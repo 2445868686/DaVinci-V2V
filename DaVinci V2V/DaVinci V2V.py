@@ -9,15 +9,12 @@ X_CENTER = (SCREEN_WIDTH - WINDOW_WIDTH) // 2
 Y_CENTER = (SCREEN_HEIGHT - WINDOW_HEIGHT) // 2
 
 SCRIPT_KOFI_URL="https://ko-fi.com/heiba"
-SCRIPT_WX_URL = "https://mp.weixin.qq.com/s?__biz=MzUzMTk2MDU5Nw==&mid=2247484626&idx=1&sn=e5eef7e48fbfbf37f208ed9a26c5475a&chksm=fabbc2a8cdcc4bbefcb7f6c72a3754335c25ec9c3e408553ec81c009531732e82cbab923276c#rd"
+SCRIPT_BILIBILI_URL  = "https://space.bilibili.com/385619394"
 AI_TRANSLATOR_KOFI_URL         = "https://ko-fi.com/s/706feb3730"
 AI_TRANSLATOR_TAOBAO_URL       = "https://item.taobao.com/item.htm?id=941978471966&pisk=gmixjtVnkLBAk6oYEx8lsCfgBuJoDUD42jkCj5Vc5bh-CjN0srasFYw3hsw_CAw_XbGM3SD6gfnTNoaZo5V06lHZ9LAHxHDq3lrXtBxhSo87Vk5_CP1GNzwTX-iubvUx3lr6tTj6-HHqgqUTVGw_FLegIs1s1rt7F7yFhlNb5__7d7Z_frafV_wUKisbGS9JVJyOhss_1_Z7nJb_flGsFLeaN-Z_fUXJ676bsG3h-ZNfaUaffGi8HzTon7tqd0wx7WHjDGs67-UYOxNJGOnwyPhYk0xAT-3Spbyx_HS4cP3jRoi99nESL4cbefOdW7gK0cUnDBQUGmPZ9ogJNiE_0JHT-4v1J70sU0U-DeXaUmDs0yqBYsNirvnTBcRw2XHjM2aIcsIPyDmLlof39RbXeLQN7rwPjSA3qzqXeBe8tKKO7NzyU8FHeLQN7rwzeWvvXN7azL5..&spm=a21xtw.29178619.0.0"
 WHISPER_KOFI_URL = "https://ko-fi.com/s/da133415d5"
 WHISPER_TAOBAO_URL = "https://item.taobao.com/item.htm?ft=t&id=959855444978"
-OPENAI_FM = "https://openai.fm"
-MINIMAX_PREW_URL = "https://www.minimax.io/audio/voices"
-MINIMAXI_PREW_URL = "https://www.minimaxi.com/audio/voices"
-
+RUNWAY_REGISTER_URL ="https://dev.runwayml.com/login"
 
 import os
 import sys
@@ -43,6 +40,7 @@ DEFAULT_SETTINGS = {
     "RUNWAY_API_KEY": "",
     "PATH":"",
     "SEED":"",
+    "SEED_RANDOM": True, 
     "RATIO":0,
     "MODEL": 0,
     "CN":True,
@@ -132,6 +130,7 @@ def render_video_by_marker(output_dir: str, custom_name: str, ratio: str) -> Opt
     render_preset = f"render_{ratio.replace(':', 'x')}"
     resolve.ImportRenderPreset(os.path.join(SCRIPT_PATH, "render_preset", f"{render_preset}.xml"))
     proj.LoadRenderPreset(render_preset)
+    proj.SetCurrentRenderFormatAndCodec("mp4", "H.264")
     markers = tl.GetMarkers() or {}
     v2v_frames = [f for f, m in markers.items() if m.get("customData") == "v2v"]
     if not v2v_frames:
@@ -286,7 +285,9 @@ def add_to_media_pool_and_timeline(start_frame, end_frame, filename):
 
     timeline_item = media_pool.AppendToTimeline([clip_info])
     if timeline_item:
+        
         print(f"Appended clip: {selected_clip.GetName()} to timeline at frame {start_frame} on track {track_index}.")
+        return True
     else:
         print("Failed to append clip to timeline.")
 
@@ -427,10 +428,14 @@ class RunwayProvider(BaseProvider):
                     show_dynamic_message(f"[Runway] PENDING…{elapsed}s", f"[Runway] 正在排队…{elapsed}s")
                     print(f"[Runway] {task_id} PENDING…{elapsed}s")
                 elif status == "RUNNING":
-                    prog = info.get("progress", 0.0) or 0.0          # 原始 0–1 浮点
-                    pct  = f"{prog * 100:.1f}%" 
+                    raw_prog = info.get("progress", 0.0)
+                    try:
+                        prog = float(raw_prog)  
+                    except (TypeError, ValueError):
+                        prog = 0.0
+                    pct = f"{prog * 100:.1f}%"
                     show_dynamic_message(f"[Runway] RUNNING... {pct}, {elapsed}s",
-                                         f"[Runway] 生成中... {pct}，{elapsed}s")
+                                        f"[Runway] 生成中... {pct}，{elapsed}s")
                     print(f"[Runway] {task_id} RUNNING...{pct}，{elapsed}s")
                 elif status == "THROTTLED":
                     show_dynamic_message(f"[Runway] THROTTLED, waiting... {elapsed}s",
@@ -466,54 +471,75 @@ class RunwayProvider(BaseProvider):
                 return None
             
     def download_file(
-            self, url: str, 
-            save_path: str, 
-            chunk_size: int = 8192
+        self, url: str, 
+        save_path: str, 
+        chunk_size: int = 8192,
+        timeout_secs: int = 300   # 新增：总超时（秒），默认 5 分钟
     ) -> str | None:
         try:
             parent = os.path.dirname(save_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
 
+            start_ts = time.time()  # 新增：记录开始时间
+
+            # 你原先的 120 秒 read 超时会被总超时兜底；也可以改为 (连接超时, 读取超时) 元组
             with requests.get(url, stream=True, timeout=120) as resp:
                 resp.raise_for_status()
 
                 total_size = int(resp.headers.get("Content-Length", 0))  # 可能为 0
                 downloaded = 0
-                last_pct   = -1        # 记录上一次已汇报的整数百分比
+                last_pct   = -1
                 last_time  = time.time()
 
                 with open(save_path, "wb") as f:
                     for chunk in resp.iter_content(chunk_size):
+                        if time.time() - start_ts >= timeout_secs:
+                            show_dynamic_message("[Runway] Download timeout (300s). Canceled.",
+                                                "[Runway] 下载超时（300秒），已取消。")
+                            try:
+                                f.close()
+                            except Exception:
+                                pass
+                            try:
+                                if os.path.exists(save_path):
+                                    os.remove(save_path)
+                            except Exception:
+                                pass
+                            return None
+
                         if not chunk:
                             continue
+
                         f.write(chunk)
                         downloaded += len(chunk)
 
-                        # —— 计算进度并判断是否需要汇报 —— #
-                        if total_size:                                # 有总长度 ⇒ 用百分比
+                        # —— 进度汇报 —— #
+                        if total_size:  # 有总长度 ⇒ 百分比
                             pct = int(downloaded * 100 / total_size)
                             if pct != last_pct:
-                                show_dynamic_message(f"[Runway] Downloading: {pct}%", f"[Runway] 下载进度: {pct}%")
+                                show_dynamic_message(f"[Runway] Downloading: {pct}%",
+                                                    f"[Runway] 下载进度: {pct}%")
                                 print(f"[Runway] Downloading: {pct}%")
                                 last_pct = pct
-                        else:                                         # 无总长度 ⇒ 用已下载 MB
+                        else:  # 无总长度 ⇒ 已下载 MB
                             if time.time() - last_time >= 0.5:
                                 mb = downloaded / (1024 * 1024)
-                                show_dynamic_message(f"[Runway] Downloaded {mb:.1f} MB", f"[Runway] 已下载 {mb:.1f} MB")
+                                show_dynamic_message(f"[Runway] Downloaded {mb:.1f} MB",
+                                                    f"[Runway] 已下载 {mb:.1f} MB")
                                 print(f"[Runway] Downloaded {mb:.1f} MB")
                                 last_time = time.time()
 
             # 下载完成
             show_dynamic_message("[Runway] File saved → " + save_path,
-                                 "[Runway] 文件已保存 → " + save_path)
-
+                                "[Runway] 文件已保存 → " + save_path)
             print(f"[Runway] 文件已保存 → {save_path}")
-            return save_path
+            return True
 
         except Exception as e:
             print(f"[Runway] 下载失败: {e}")
             return None
+
         
 v2v_win = dispatcher.AddWindow(
     {
@@ -530,20 +556,26 @@ v2v_win = dispatcher.AddWindow(
                 ui.VGroup({"Weight":1},[
                     ui.TextEdit({"ID": "Prompt", "Text": "", "PlaceholderText": "Prompt ...", "Weight": 0.4}),
                     ui.HGroup({"Weight":0.1},[
-                            ui.Label({"ID":"ModelLabel","Text":"Model:","Weight":0.1}),
-                            ui.ComboBox({"ID":"ModelCombo","Weight":0.1}),                    
+                            ui.Label({"ID":"ModelLabel","Text":"Model:","Weight":0.4}),
+                            ui.ComboBox({"ID":"ModelCombo","Weight":0.6}),                    
                         ]),
                     ui.HGroup({"Weight":0.1},[
-                            ui.Label({"ID":"RatioLabel","Text":"Ratio:","Weight":0.1}),
-                            ui.ComboBox({"ID":"RatioCombo","Weight":0.1}),                    
+                            ui.Label({"ID":"RatioLabel","Text":"Ratio:","Weight":0.4}),
+                            ui.ComboBox({"ID":"RatioCombo","Weight":0.6}),                    
                         ]),
                     ui.HGroup({"Weight": 0.1}, [
-                        ui.Label({"ID":"SeedLabel","Text":"Seed:","Weight":0.1}),
-                        ui.LineEdit({"ID": "SeedInput", "Text": "", "PlaceholderText": "","Weight":0.1})
+                        ui.Label({"ID":"SeedLabel","Text":"Seed:","Weight":0.4}),
+                        ui.LineEdit({"ID": "SeedInput", "Text": "", "PlaceholderText": "","Weight":0.3}),
+                        ui.CheckBox({"ID":"RandSeedCheckBox","Text":"Random","Checked": True, "Weight":0.3, "Alignment": {"AlignLeft": True},})
                     ]),
+                    ui.HGroup({"Weight":0.1}, [
+                            ui.Label({"ID":"RefLabel","Text":"Reference:","Weight":0.4}),
+                            ui.Label({"ID":"RefPath","Text":"", "WordWrap": True, "Weight":0.3}),  # 显示所选图片路径
+                            ui.Button({"ID":"SelectRefButton","Text":"Select","Weight":0.3})
+                        ]),
                     ui.HGroup({"Weight": 0.1}, [
-                        ui.Label({"ID":"TaskIDLabel","Text":"Task ID:","Weight":0.1}),
-                        ui.LineEdit({"ID": "TaskID", "Text": "", "PlaceholderText": "","Weight":0.1})
+                        ui.Label({"ID":"TaskIDLabel","Text":"Task ID:","Weight":0.4}),
+                        ui.LineEdit({"ID": "TaskID", "Text": "", "PlaceholderText": "","Weight":0.6})
                     ]),
                     ui.HGroup({"Weight": 0.1}, [
                         ui.Button({"ID": "PostButton", "Text": "提交任务", "Weight": 0.2}),
@@ -626,7 +658,7 @@ msgbox = dispatcher.AddWindow(
         [
             ui.VGroup(
                 [
-                    ui.Label({"ID": 'WarningLabel', "Text": ""}),
+                    ui.Label({"ID": 'WarningLabel', "Text": "",'Alignment': { 'AlignCenter' : True },'WordWrap': True}),
                     ui.HGroup({"Weight": 0}, [ui.Button({"ID": 'OkButton', "Text": 'OK'})]),
                 ]
             ),
@@ -637,7 +669,10 @@ translations = {
         "Tabs": ["Runway","配置"],
         "ModelLabel":"模型：",
         "SeedLabel":"随机种子：",
-        "PostButton":"提交任务",
+        "RefLabel":"参考图：",
+        "SelectRefButton":"选择图片",
+        "RandSeedCheckBox":"随机",
+        "PostButton":"生成",
         "GetButton":"下载视频",
         "TaskIDLabel":"任务ID：",
         "RatioLabel":"比例：",
@@ -657,8 +692,11 @@ translations = {
         "Tabs": ["Runway","Configuration"],
         "ModelLabel":"Model:",
         "SeedLabel":"Seed:",
+        "RefLabel":"Reference:",
+        "SelectRefButton":"Select",
+        "RandSeedCheckBox":"Random",
         "PostButton":"Generate",
-        "GetButton":"Get Video",
+        "GetButton":"Download Video",
         "RatioLabel":"Ratio:",
         "TaskIDLabel":"Task ID:",
         "PathLabel":"Save Path",
@@ -688,7 +726,7 @@ runway_items       = v2v_win.GetItems()
 msg_items = msgbox.GetItems()
 runway_config_items = runway_config_win.GetItems()
 runway_items["MyStack"].CurrentIndex = 0
-
+runway_items["GetButton"].Enabled = False
 
 for tab_name in translations["cn"]["Tabs"]:
     runway_items["MyTabs"].AddTab(tab_name)
@@ -698,6 +736,36 @@ for model in RunwayProvider.MODEL:
 
 for ratio in RunwayProvider.ACCEPTED_RATIOS:
     runway_items["RatioCombo"].AddItem(ratio)
+
+def on_select_ref_image(ev):
+    # 初始目录优先用当前保存路径或脚本路径
+    start_dir = runway_items["Path"].Text or SCRIPT_PATH
+    try:
+        # 只允许选择 jpg/jpeg/png/webp
+        selected = fusion.RequestFile(start_dir, ["*.jpg", "*.jpeg", "*.png", "*.webp"])
+    except Exception:
+        selected = None
+
+    if selected and os.path.exists(selected):
+        # 校验 MIME 类型
+        mime_type, _ = mimetypes.guess_type(selected)
+        allowed_mimes = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
+
+        if mime_type and mime_type.lower() in allowed_mimes:
+            # 显示文件名（不显示完整路径）
+            runway_items["RefPath"].Text = selected
+        else:
+            show_dynamic_message("Only JPEG, PNG, WebP images are allowed.",
+                                 "仅支持 JPEG、PNG、WebP 图片。")
+
+v2v_win.On.SelectRefButton.Clicked = on_select_ref_image
+
+def on_rand_seed_toggled(ev):
+    # 勾选随机 ⇒ 禁用 SeedInput；未勾选 ⇒ 允许手动输入
+    checked = runway_items["RandSeedCheckBox"].Checked
+    runway_items["SeedInput"].Enabled = (not checked)
+
+v2v_win.On.RandSeedCheckBox.Clicked = on_rand_seed_toggled
 
 
 def switch_language(lang):
@@ -730,10 +798,13 @@ if saved_settings:
     runway_items["ModelCombo"].CurrentIndex = saved_settings.get("MODEL", DEFAULT_SETTINGS["MODEL"])
     runway_items["RatioCombo"].CurrentIndex = saved_settings.get("RATIO", DEFAULT_SETTINGS["RATIO"])
     runway_items["SeedInput"].Text = saved_settings.get("SEED", DEFAULT_SETTINGS["SEED"])
+    runway_items["RandSeedCheckBox"].Checked = saved_settings.get("SEED_RANDOM", DEFAULT_SETTINGS["SEED_RANDOM"])
     runway_items["LangCnCheckBox"].Checked = saved_settings.get("CN", DEFAULT_SETTINGS["CN"])
     runway_items["LangEnCheckBox"].Checked = saved_settings.get("EN", DEFAULT_SETTINGS["EN"])
     runway_config_items["RunwayBaseURL"].Text = saved_settings.get("RUNWAY_BASE_URL", DEFAULT_SETTINGS["RUNWAY_BASE_URL"])
     runway_config_items["RunwayApiKey"].Text = saved_settings.get("RUNWAY_API_KEY", DEFAULT_SETTINGS["RUNWAY_API_KEY"])
+
+    runway_items["SeedInput"].Enabled = (not runway_items["RandSeedCheckBox"].Checked)
     
 if runway_items["LangEnCheckBox"].Checked :
     print("en")
@@ -743,46 +814,128 @@ else:
     switch_language("cn")
 
 def on_post_clicked(ev):
-
+    # 1) 基本就绪检查
     resolve, proj, mpool, root, tl, fps = connect_resolve()
     if not tl:
         show_dynamic_message("No active timeline.", "没有激活的时间线。")
         return
-    
-    render_file = os.path.join(TEMP_DIR,  f"render_{tl.GetUniqueId()}" + ".mp4")
 
+    # 2) 确保临时目录存在
+    try:
+        os.makedirs(TEMP_DIR, exist_ok=True)
+    except Exception as e:
+        show_dynamic_message(f"[Runway] Failed to prepare temp dir: {e}",
+                             f"[Runway] 创建临时目录失败：{e}")
+        return
+
+    # 3) 渲染或复用缓存
+    render_file = os.path.join(TEMP_DIR, f"render_{tl.GetUniqueId()}.mp4")
     if not os.path.exists(render_file):
         show_dynamic_message("[Runway] Rendering...", "[Runway] 视频处理中...")
         ratio = runway_items["RatioCombo"].CurrentText or "1280:720"
-        render_file = render_video_by_marker(TEMP_DIR,f"render_{tl.GetUniqueId()}", ratio)
+        render_file = render_video_by_marker(TEMP_DIR, f"render_{tl.GetUniqueId()}", ratio)
+        if not render_file or not os.path.exists(render_file):
+            show_dynamic_message("[Runway] Render failed.", "[Runway] 渲染失败。")
+            return
     else:
-        print(f"Found cached audio: {render_file}. Skipping render.")
+        print(f"Found cached video: {render_file}. Skipping render.")
 
-    # 根据 UI 选择实例化 provider
-    base_url= runway_config_items["RunwayBaseURL"].Text
-    api_key = runway_config_items["RunwayApiKey"].Text.strip()  # 继续复用 OpenAI 弹窗存储的输入
-    
-    provider = RunwayProvider(base_url,api_key)
-    show_dynamic_message("[Runway] Generating... ", "[Runway] 生成中... ")
-    import random
+    # 4) Provider 参数校验与准备
+    base_url = (runway_config_items["RunwayBaseURL"].Text or "").strip()
+    api_key  = (runway_config_items["RunwayApiKey"].Text or "").strip()
 
-    def generate_random_seed():
-        return random.randint(0, 4294967295)
-    seed = generate_random_seed()
-    runway_items["SeedInput"].Text = str(seed)
+    # Base URL 为空则采用默认
+    if not base_url:
+        base_url = RunwayProvider.BASE_URL
+
+    if not api_key:
+        show_dynamic_message("[Runway] Missing API Key.", "[Runway] 缺少 API Key。")
+        return
+
+    provider = RunwayProvider(base_url, api_key)
+
+    # 5) 生成/读取种子，确保为 int
+    import random, mimetypes
+    use_random = runway_items["RandSeedCheckBox"].Checked
+    seed = None
+    if use_random:
+        seed = random.randint(0, 4294967295)
+        runway_items["SeedInput"].Text = str(seed)   # 回显
+    else:
+        seed_text = (runway_items["SeedInput"].Text or "").strip()
+        seed = int(seed_text) if seed_text else None   # 为空则不传 seed
+    ref_path = (runway_items["RefPath"].Text or "").strip()
+    references = None
+    if ref_path and os.path.exists(ref_path):
+        try:
+            img_uri = RunwayProvider._file_to_data_uri(ref_path)
+            # tag 可用于在 prompt 中 @ref1 引用（图像端点明确支持；视频端点同结构）
+            references = [{"type": "image", "uri": img_uri}]
+        except Exception as e:
+            print(f"[Runway] 参考图读入失败: {e}")
+            references = None
+            
+    # 6) 发起任务
+    show_dynamic_message("[Runway] Generating...", "[Runway] 生成中...")
     task_id = provider.video_to_video(
-        video_path  = render_file,
-        prompt      = runway_items["Prompt"].PlainText,
-        model       = runway_items["ModelCombo"].CurrentText or "gen4_aleph",
-        ratio       = runway_items["RatioCombo"].CurrentText or "1280:720",
-        seed        = int(runway_items["SeedInput"].Text)
+        video_path=render_file,
+        prompt=runway_items["Prompt"].PlainText,
+        model=runway_items["ModelCombo"].CurrentText or "gen4_aleph",
+        ratio=runway_items["RatioCombo"].CurrentText or "1280:720",
+        seed=seed,
+        references=references
     )
-    show_dynamic_message(f"[Runway] Task ID: {task_id}", f"[Runway] 任务 ID: {task_id}")
+
+    show_dynamic_message(f"[Runway] Task ID: {task_id}",
+                         f"[Runway] 任务 ID: {task_id}")
     print(f"任务 ID: {task_id}")
-    if task_id:
-        runway_items["TaskID"].Text = task_id
-        url = provider.get_task_status(task_id)
-        show_dynamic_message(f"[Runway] Task ID: {task_id}", f"[Runway] 点击下载: {task_id}")
+
+    if not task_id:
+        # video_to_video 已经做了详细报错提示
+        return
+
+    runway_items["TaskID"].Text = task_id
+
+    # 7) 轮询拿结果 URL
+    file_url = provider.get_task_status(task_id)
+    if isinstance(file_url, list):  # 兼容列表返回
+        file_url = file_url[0]
+
+    if not file_url:
+        show_dynamic_message("[Runway] No output URL.", "[Runway] 未获取到输出地址。")
+        return
+
+    # 8) 准备保存路径并下载
+    save_path = generate_filename(
+        runway_items["Path"].Text,
+        runway_items["Prompt"].PlainText,
+        ".mp4"
+    )
+
+    if not provider.download_file(file_url, save_path):
+        show_dynamic_message("[Runway] Download Failed!", "[Runway] 下载失败！")
+        return
+
+    # 9) 写回时间线（基于第一个 marker 放置）
+    timeline_start_frame = tl.GetStartFrame()
+    markers = tl.GetMarkers()
+    if not markers:
+        show_dynamic_message("[Runway] No markers.", "[Runway] 未找到标记。")
+        return
+
+    first_frame_id = sorted(markers.keys())[0]
+    local_start = int(first_frame_id)
+    mark_in = timeline_start_frame + local_start
+
+    success = add_to_media_pool_and_timeline(mark_in, tl.GetEndFrame(), save_path)
+    if success:
+        show_dynamic_message("[Runway] Finish!", "[Runway] 完成！")
+        runway_items["TaskID"].Text = ""  # 成功后清空 TaskID
+    else:
+        show_dynamic_message("[Runway] Append to timeline failed.",
+                             "[Runway] 添加到时间线失败。")
+
+        
 
     
 v2v_win.On.PostButton.Clicked = on_post_clicked
@@ -799,26 +952,45 @@ def on_get_clicked(ev):
         show_dynamic_message("[Runway] Missing Task ID", "[Runway] 缺少任务 ID")
         return
     provider = RunwayProvider(base_url,api_key)
-    save_path = generate_filename(runway_items["Path"].Text, runway_items["Prompt"].PlainText, '.mp4') 
+
+    show_dynamic_message("[Runway] Start...", "[Runway] 开始...") 
     file_url = provider.get_task_status(task_id)
-    if isinstance(file_url, list):   # 双重保险
+    if isinstance(file_url, list):  # 兼容列表返回
         file_url = file_url[0]
-    if file_url:
-        provider.download_file(file_url, save_path)
-        timeline_start_frame = tl.GetStartFrame()
-        markers = tl.GetMarkers()
-        if not markers:
-            print("No markers found.")
-            return None
-        first_frame_id = sorted(markers.keys())[0]
-        #marker_info = markers[first_frame_id]
-        local_start = int(first_frame_id)
-        #local_end   = local_start + int(marker_info["duration"]) - 1
-        mark_in  = timeline_start_frame + local_start
-        #mark_out = timeline_start_frame + local_end
-        add_to_media_pool_and_timeline(mark_in,tl.GetEndFrame(),save_path)
+
+    if not file_url:
+        show_dynamic_message("[Runway] No output URL.", "[Runway] 未获取到输出地址。")
+        return
+
+    # 8) 准备保存路径并下载
+    save_path = generate_filename(
+        runway_items["Path"].Text,
+        runway_items["Prompt"].PlainText,
+        ".mp4"
+    )
+
+    if not provider.download_file(file_url, save_path):
+        show_dynamic_message("[Runway] Download Failed!", "[Runway] 下载失败！")
+        return
+
+    # 9) 写回时间线（基于第一个 marker 放置）
+    timeline_start_frame = tl.GetStartFrame()
+    markers = tl.GetMarkers()
+    if not markers:
+        show_dynamic_message("[Runway] No markers.", "[Runway] 未找到标记。")
+        return
+
+    first_frame_id = sorted(markers.keys())[0]
+    local_start = int(first_frame_id)
+    mark_in = timeline_start_frame + local_start
+
+    success = add_to_media_pool_and_timeline(mark_in, tl.GetEndFrame(), save_path)
+    if success:
         show_dynamic_message("[Runway] Finish!", "[Runway] 完成！")
-    print(f"文件地址: {file_url}")
+        runway_items["TaskID"].Text = ""  # 成功后清空 TaskID
+    else:
+        show_dynamic_message("[Runway] Append to timeline failed.",
+                             "[Runway] 添加到时间线失败。")
 v2v_win.On.GetButton.Clicked = on_get_clicked
 
 def save_file():
@@ -827,6 +999,7 @@ def save_file():
         "RUNWAY_API_KEY": runway_config_items["RunwayApiKey"].Text,
         "PATH":runway_items["Path"].Text,
         "SEED": runway_items["SeedInput"].Text,
+        "SEED_RANDOM": runway_items["RandSeedCheckBox"].Checked,
         "RATIO": runway_items["RatioCombo"].CurrentIndex,
         "MODEL": runway_items["ModelCombo"].CurrentIndex,
         "CN":runway_items["LangCnCheckBox"].Checked,
@@ -860,9 +1033,27 @@ def on_browse_button_clicked(ev):
         print("No directory selected or the request failed.")
 v2v_win.On.Browse.Clicked = on_browse_button_clicked
 
+def on_text_changed(ev):
+    if runway_items["TaskID"].Text:
+        runway_items["GetButton"].Enabled = True
+    else:
+        runway_items["GetButton"].Enabled = False
+v2v_win.On.TaskID.TextChanged = on_text_changed
+
 def on_my_tabs_current_changed(ev):
     runway_items["MyStack"].CurrentIndex = ev["Index"]
 v2v_win.On.MyTabs.CurrentChanged = on_my_tabs_current_changed
+
+def on_open_link_button_clicked(ev):
+    if runway_items["LangEnCheckBox"].Checked :
+        webbrowser.open(SCRIPT_KOFI_URL)
+    else :
+        webbrowser.open(SCRIPT_BILIBILI_URL)
+v2v_win.On.CopyrightButton.Clicked = on_open_link_button_clicked
+
+def on_open_register_button_clicked(ev):
+    webbrowser.open(RUNWAY_REGISTER_URL)
+runway_config_win.On.RunwayRegisterButton.Clicked = on_open_register_button_clicked
 
 def on_show_runway(ev):
     runway_config_win.Show()
