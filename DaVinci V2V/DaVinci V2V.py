@@ -25,7 +25,6 @@ import wave
 import json
 import base64
 import mimetypes
-import requests
 import webbrowser
 from xml.dom import minidom
 import xml.etree.ElementTree as ET
@@ -92,6 +91,49 @@ except ImportError:
     import DaVinciResolveScript as dvr_script
     from python_get_resolve import GetResolve
     print("DaVinciResolveScript from DaVinci")
+    
+try:
+    import requests
+except ImportError:
+    system = platform.system()
+    if system == "Windows":
+        program_data = os.environ.get("PROGRAMDATA", r"C:\ProgramData")
+        lib_dir = os.path.join(
+            program_data,
+            "Blackmagic Design",
+            "DaVinci Resolve",
+            "Fusion",
+            "HB",
+            SCRIPT_NAME,
+            "Lib"
+        )
+    elif system == "Darwin":
+        lib_dir = os.path.join(
+            "/Library",
+            "Application Support",
+            "Blackmagic Design",
+            "DaVinci Resolve",
+            "Fusion",
+            "HB",
+            SCRIPT_NAME,
+            "Lib"
+        )
+    else:
+        lib_dir = os.path.normpath(
+            os.path.join(SCRIPT_PATH, "..", "..", "..","HB", SCRIPT_NAME,"Lib")
+        )
+
+    lib_dir = os.path.normpath(lib_dir)
+    if os.path.isdir(lib_dir):
+        sys.path.insert(0, lib_dir)
+    else:
+        print(f"Warning: The TTS/Lib directory doesn’t exist:{lib_dir}", file=sys.stderr)
+
+    try:
+        import requests
+        print(lib_dir)
+    except ImportError as e:
+        print("Dependency import failed—please make sure all dependencies are bundled into the Lib directory:", lib_dir, "\nError message:", e)
 
 def connect_resolve():
     project_manager = resolve.GetProjectManager()
