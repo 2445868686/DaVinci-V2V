@@ -143,94 +143,6 @@ def connect_resolve():
     timeline      = proj.GetCurrentTimeline()
     fps     = float(proj.GetSetting("timelineFrameRate"))
     return resolve, proj, media_pool,root_folder,timeline, fps
-
-def add_v2v_marker():
-    resolve, proj, mpool, root, tl, fps = connect_resolve()
-    marker_frame = 0
-    #print(marker_frame)
-    marker_name = "Render Marker" 
-    marker_note = "Drag the marker to set the rendering range" 
-    marker_date = "v2v"
-    marker_color = "Yellow"
-    marker_duration = 125
-
-    tl.DeleteMarkerAtFrame(marker_frame)
-    success = tl.AddMarker(
-        marker_frame,
-        marker_color,
-        marker_name,
-        marker_note,
-        marker_duration,
-        marker_date
-    )
-    print("✅ Marker added successfully!" if success else "❌ Failed to add marker, please check if the frameId or other parameters are correct.")
-
-add_v2v_marker()
-
-def render_video_by_marker(output_dir: str, custom_name: str, ratio: str) -> Optional[str]:
-    resolve, proj, mpool, root, tl, fps = connect_resolve()
-    render_preset = f"render_{ratio.replace(':', 'x')}"
-    resolve.ImportRenderPreset(os.path.join(SCRIPT_PATH, "render_preset", f"{render_preset}.xml"))
-    proj.LoadRenderPreset(render_preset)
-    proj.SetCurrentRenderFormatAndCodec("mp4", "H.264")
-    markers = tl.GetMarkers() or {}
-    v2v_frames = [f for f, m in markers.items() if m.get("customData") == "v2v"]
-    if not v2v_frames:
-        print("No V2V markers found.")
-        return None
-    first_frame_id = sorted(v2v_frames)[0]
-    marker_info = markers[first_frame_id]
-    local_start = int(first_frame_id)
-    local_end   = local_start + int(marker_info["duration"]) - 1
-    timeline_start_frame = tl.GetStartFrame()
-    mark_in  = timeline_start_frame + local_start
-    mark_out = timeline_start_frame + local_end
-    settings = {
-        "MarkIn": mark_in,
-        "MarkOut": mark_out,
-        "TargetDir": output_dir,
-        "CustomName": custom_name,
-        "ExportVideo": True,
-        "ExportAudio": False,
-        "SelectAllFrames": False,  # 只渲染 Mark 区域
-    }
-    proj.SetRenderSettings(settings)
-    job_id = proj.AddRenderJob()
-    if not job_id:
-        print("添加渲染任务失败")
-        return None
-
-    if not proj.StartRendering(job_id):
-        print("渲染启动失败")
-        return None
-    import time
-    while proj.IsRenderingInProgress():
-        print("Rendering...")
-        time.sleep(0.5)  
-    resolve.OpenPage("edit")
-    render_file = os.path.join(output_dir, custom_name + ".mp4")
-    return render_file
-
-def get_first_empty_track(timeline, start_frame, end_frame, media_type):
-    """获取当前播放头位置的第一个空轨道索引"""
-    track_index = 1
-    while True:
-        runway_items = timeline.GetItemListInTrack(media_type, track_index)
-        if not runway_items:
-            return track_index
-        
-        # 检查轨道上是否有片段与给定的start_frame和end_frame重叠
-        is_empty = True
-        for item in runway_items:
-            if item.GetStart() <= end_frame and start_frame <= item.GetEnd():
-                is_empty = False
-                break
-        
-        if is_empty:
-            return track_index
-        
-        track_index += 1
-
 def timecode_to_frames(timecode, frame_rate):
     """
     将时间码转换为帧数。
@@ -241,7 +153,6 @@ def timecode_to_frames(timecode, frame_rate):
     - 对应时间码的帧数。
     """
     try:
-        # 提取时间组件
         match = re.match(r"^(\d{2}):(\d{2}):(\d{2})([:;])(\d{2,3})$", timecode)
         if not match:
             raise ValueError(f"Invalid timecode format: {timecode}")
@@ -280,6 +191,96 @@ def timecode_to_frames(timecode, frame_rate):
     except ValueError as e:
         print(f"Error converting timecode to frames: {e}")
         return None
+
+def render_video_by_marker(output_dir: str, custom_name: str, ratio_text: str) -> Optional[str]:
+    resolve, proj, mpool, root, tl, fps = connect_resolve()
+    if not proj or not tl:
+        print("[Render] No active project/timeline.")
+        return None
+
+    # 1) 解析 “宽:高”
+    try:
+        w_str, h_str = ratio_text.split(":")
+        W, H = int(w_str), int(h_str)
+    except Exception:
+        print(f"[Render] Invalid ratio: {ratio_text}")
+        return None
+
+    # 2) 设置容器/编码 = MP4 / H.264（内部键值）
+    fmt = "mp4"
+    codecs_map = proj.GetRenderCodecs(fmt) or {}  # 例: {"H.264": "H264", "H.265": "H265"}
+    h264_key   = codecs_map.get("H.264") or codecs_map.get("H264") or "H264"
+    proj.SetCurrentRenderFormatAndCodec(fmt, h264_key)
+
+    supported = proj.GetRenderResolutions(fmt, h264_key) or []
+    if supported and not any(int(it.get("Width", -1)) == W and int(it.get("Height", -1)) == H for it in supported):
+        print(f"[Render] Warning: {W}x{H} not in GetRenderResolutions list for MP4/H.264.")
+
+    # 3) 计算 MarkIn / MarkOut（按 v2v 标记）
+    markers = tl.GetMarkers() or {}
+    v2v_frames = [int(f) for f, m in markers.items() if m.get("customData") == "v2v"]
+    if not v2v_frames:
+        print("[Render] No V2V markers found.")
+        return None
+
+    first_frame_id   = min(v2v_frames)
+    marker_info      = markers[first_frame_id]
+    local_start      = int(first_frame_id)
+    local_end        = local_start + int(marker_info["duration"]) - 1
+    timeline_start   = tl.GetStartFrame() or 0
+    mark_in          = timeline_start + local_start
+    mark_out         = timeline_start + local_end
+
+    # 4) 显式设置渲染参数（含分辨率）
+    settings = {
+        "MarkIn": mark_in,
+        "MarkOut": mark_out,
+        "SelectAllFrames": False,
+        "TargetDir": output_dir,
+        "CustomName": custom_name,
+        "ExportVideo": True,
+        "ExportAudio": False,
+        "FormatWidth": W,     
+        "FormatHeight": H,     
+        # 需要可再加： "FrameRate": fps, "PixelAspectRatio": "square"
+    }
+    proj.SetRenderSettings(settings)
+
+    # 5) 入队并渲染
+    job_id = proj.AddRenderJob()
+    if not job_id:
+        print("[Render] AddRenderJob failed.")
+        return None
+    if not proj.StartRendering(job_id):
+        print("[Render] StartRendering failed.")
+        return None
+    while proj.IsRenderingInProgress():
+        print("Rendering...")
+        time.sleep(0.5)
+    proj.DeleteRenderJob(job_id)
+
+    resolve.OpenPage("edit")
+    return os.path.join(output_dir, custom_name + ".mp4")
+
+def get_first_empty_track(timeline, start_frame, end_frame, media_type):
+    """获取当前播放头位置的第一个空轨道索引"""
+    track_index = 1
+    while True:
+        runway_items = timeline.GetItemListInTrack(media_type, track_index)
+        if not runway_items:
+            return track_index
+        is_empty = True
+        for item in runway_items:
+            if item.GetStart() <= end_frame and start_frame <= item.GetEnd():
+                is_empty = False
+                break
+        
+        if is_empty:
+            return track_index
+        
+        track_index += 1
+
+
     
 def add_to_media_pool_and_timeline(start_frame, end_frame, filename):
     resolve, proj, mpool, root, tl, fps = connect_resolve()
@@ -321,8 +322,8 @@ def add_to_media_pool_and_timeline(start_frame, end_frame, filename):
         "startFrame": 0,
         "endFrame": clip_duration_frames - 1,
         "trackIndex": track_index,
-        "recordFrame": start_frame,  # 在字幕的起始位置添加
-        "stereoEye": "both"  # 设置为立体声
+        "recordFrame": start_frame,  
+        "stereoEye": "both"  
     }
 
     timeline_item = media_pool.AppendToTimeline([clip_info])
@@ -404,7 +405,6 @@ class RunwayProvider(BaseProvider):
         references: list | None = None,
         public_figure_threshold: str = "low"
     ) -> str | None:
-        # —— 使用类常量做校验 ——  
         if model not in self.MODEL:
             print(f"[Runway] model 必须为 {self.MODEL}，已收到: {model}")
             return None
@@ -516,20 +516,19 @@ class RunwayProvider(BaseProvider):
         self, url: str, 
         save_path: str, 
         chunk_size: int = 8192,
-        timeout_secs: int = 300   # 新增：总超时（秒），默认 5 分钟
+        timeout_secs: int = 300   
     ) -> str | None:
         try:
             parent = os.path.dirname(save_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
 
-            start_ts = time.time()  # 新增：记录开始时间
+            start_ts = time.time()  
 
-            # 你原先的 120 秒 read 超时会被总超时兜底；也可以改为 (连接超时, 读取超时) 元组
             with requests.get(url, stream=True, timeout=120) as resp:
                 resp.raise_for_status()
 
-                total_size = int(resp.headers.get("Content-Length", 0))  # 可能为 0
+                total_size = int(resp.headers.get("Content-Length", 0))  
                 downloaded = 0
                 last_pct   = -1
                 last_time  = time.time()
@@ -557,7 +556,7 @@ class RunwayProvider(BaseProvider):
                         downloaded += len(chunk)
 
                         # —— 进度汇报 —— #
-                        if total_size:  # 有总长度 ⇒ 百分比
+                        if total_size:  
                             pct = int(downloaded * 100 / total_size)
                             if pct != last_pct:
                                 show_dynamic_message(f"[Runway] Downloading: {pct}%",
@@ -780,21 +779,17 @@ for ratio in RunwayProvider.ACCEPTED_RATIOS:
     runway_items["RatioCombo"].AddItem(ratio)
 
 def on_select_ref_image(ev):
-    # 初始目录优先用当前保存路径或脚本路径
     start_dir = runway_items["Path"].Text or SCRIPT_PATH
     try:
-        # 只允许选择 jpg/jpeg/png/webp
         selected = fusion.RequestFile(start_dir, ["*.jpg", "*.jpeg", "*.png", "*.webp"])
     except Exception:
         selected = None
 
     if selected and os.path.exists(selected):
-        # 校验 MIME 类型
         mime_type, _ = mimetypes.guess_type(selected)
         allowed_mimes = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
 
         if mime_type and mime_type.lower() in allowed_mimes:
-            # 显示文件名（不显示完整路径）
             runway_items["RefPath"].Text = selected
         else:
             show_dynamic_message("Only JPEG, PNG, WebP images are allowed.",
@@ -803,10 +798,8 @@ def on_select_ref_image(ev):
 v2v_win.On.SelectRefButton.Clicked = on_select_ref_image
 
 def on_rand_seed_toggled(ev):
-    # 勾选随机 ⇒ 禁用 SeedInput；未勾选 ⇒ 允许手动输入
     checked = runway_items["RandSeedCheckBox"].Checked
     runway_items["SeedInput"].Enabled = (not checked)
-
 v2v_win.On.RandSeedCheckBox.Clicked = on_rand_seed_toggled
 
 
@@ -854,6 +847,61 @@ if runway_items["LangEnCheckBox"].Checked :
 else:
     print("cn")
     switch_language("cn")
+    
+def add_v2v_marker():
+    resolve, proj, mpool, root, tl, fps = connect_resolve()
+    if not tl:
+        print("❌ No active timeline.")
+        return
+    cur_tc   = tl.GetCurrentTimecode()          
+    start_tc = tl.GetStartTimecode()             
+    cur_abs_frames   = timecode_to_frames(cur_tc,   fps)  
+    start_abs_frames = timecode_to_frames(start_tc, fps) if start_tc else 0
+    playhead_frame   = max(0, cur_abs_frames - start_abs_frames)
+
+    def _clear_all_v2v_markers(timeline):
+        removed = 0
+
+        while True:
+            ok = timeline.DeleteMarkerByCustomData("v2v")
+            if not ok:
+                break
+            removed += 1
+        if removed == 0:
+            markers = timeline.GetMarkers() or {}
+            for frame_id, info in list(markers.items()):
+                if info.get("customData") == "v2v":
+                    timeline.DeleteMarkerAtFrame(int(frame_id))
+                    removed += 1
+
+        return removed
+
+    removed_count = _clear_all_v2v_markers(tl)
+    print(f"🧹 Removed {removed_count} existing v2v marker(s).")
+
+    en_checked = runway_items["LangEnCheckBox"].Checked
+    marker_name = "Render Range" if en_checked else "渲染范围"
+    marker_note = ("Drag the marker to set the rendering range (default: 5s)"
+                   if en_checked else "拖动Marker点设置渲染范围（默认：120帧）")
+
+    marker_color    = "Yellow"
+    marker_duration = 120 
+
+
+    tl.DeleteMarkerAtFrame(playhead_frame)
+
+    success = tl.AddMarker(
+        playhead_frame,
+        marker_color,
+        marker_name,
+        marker_note,
+        marker_duration,
+        "v2v"  
+    )
+
+    print("✅ Marker added successfully!" if success else "❌ Failed to add marker. Please check parameters.")
+
+add_v2v_marker()
 
 def on_post_clicked(ev):
     # 1) 基本就绪检查
@@ -902,16 +950,15 @@ def on_post_clicked(ev):
     seed = None
     if use_random:
         seed = random.randint(0, 4294967295)
-        runway_items["SeedInput"].Text = str(seed)   # 回显
+        runway_items["SeedInput"].Text = str(seed)   
     else:
         seed_text = (runway_items["SeedInput"].Text or "").strip()
-        seed = int(seed_text) if seed_text else None   # 为空则不传 seed
+        seed = int(seed_text) if seed_text else None   
     ref_path = (runway_items["RefPath"].Text or "").strip()
     references = None
     if ref_path and os.path.exists(ref_path):
         try:
             img_uri = RunwayProvider._file_to_data_uri(ref_path)
-            # tag 可用于在 prompt 中 @ref1 引用（图像端点明确支持；视频端点同结构）
             references = [{"type": "image", "uri": img_uri}]
         except Exception as e:
             print(f"[Runway] 参考图读入失败: {e}")
@@ -940,7 +987,7 @@ def on_post_clicked(ev):
 
     # 7) 轮询拿结果 URL
     file_url = provider.get_task_status(task_id)
-    if isinstance(file_url, list):  # 兼容列表返回
+    if isinstance(file_url, list):  
         file_url = file_url[0]
 
     if not file_url:
@@ -972,7 +1019,7 @@ def on_post_clicked(ev):
     success = add_to_media_pool_and_timeline(mark_in, tl.GetEndFrame(), save_path)
     if success:
         show_dynamic_message("[Runway] Finish!", "[Runway] 完成！")
-        runway_items["TaskID"].Text = ""  # 成功后清空 TaskID
+        runway_items["TaskID"].Text = ""  
     else:
         show_dynamic_message("[Runway] Append to timeline failed.",
                              "[Runway] 添加到时间线失败。")
@@ -997,7 +1044,7 @@ def on_get_clicked(ev):
 
     show_dynamic_message("[Runway] Start...", "[Runway] 开始...") 
     file_url = provider.get_task_status(task_id)
-    if isinstance(file_url, list):  # 兼容列表返回
+    if isinstance(file_url, list):  
         file_url = file_url[0]
 
     if not file_url:
@@ -1029,7 +1076,7 @@ def on_get_clicked(ev):
     success = add_to_media_pool_and_timeline(mark_in, tl.GetEndFrame(), save_path)
     if success:
         show_dynamic_message("[Runway] Finish!", "[Runway] 完成！")
-        runway_items["TaskID"].Text = ""  # 成功后清空 TaskID
+        runway_items["TaskID"].Text = ""  
     else:
         show_dynamic_message("[Runway] Append to timeline failed.",
                              "[Runway] 添加到时间线失败。")
@@ -1063,7 +1110,6 @@ def on_browse_button_clicked(ev):
     current_path = runway_items["Path"].Text
     selected_path = fusion.RequestDir(current_path)
     if selected_path:
-        # 创建以项目名称命名的子目录
         project_subdir = os.path.join(selected_path, f"{proj.GetName()}_V2V")
         try:
             os.makedirs(project_subdir, exist_ok=True)
