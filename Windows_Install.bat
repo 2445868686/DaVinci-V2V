@@ -1,71 +1,84 @@
 @echo off
-rem 设置代码页为 UTF-8，确保后续输出的字符正确显示
 chcp 65001 >nul
-setlocal
+setlocal enabledelayedExpansion
 
-:: ============ 可根据需要修改 =============
-set "PYTHON=python" 
+rem ======== Variables (modify as needed) ========
+set "PYTHON=python"
 set "SCRIPT_NAME=DaVinci V2V"
 set "WHEEL_DIR=C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\HB\%SCRIPT_NAME%\wheel"
 set "TARGET_DIR=C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\HB\%SCRIPT_NAME%\Lib"
-
-:: 将所有需要安装的包放在一个变量里
-:: 新增了 setuptools 和 wheel，它们是安装源代码包所必需的构建工具
+rem All required packages
 set "PACKAGES=requests"
+rem Official and mirror indexes
+set "PIP_OFFICIAL=https://pypi.org/simple"
+set "PIP_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple"
+rem =============================================
 
-:: 指定使用的镜像源
-set "PIP_MIRROR=-i https://pypi.tuna.tsinghua.edu.cn/simple"
-:: =========================================
-
-echo [START] download & offline install : %PACKAGES%
+echo.
+echo [%DATE% %TIME%] Starting download and offline installation of dependencies
 echo ------------------------------------------------------------
 
-:: 1. 创建目录（如果不存在）
-echo [1/4] Checking and creating directories...
-if not exist "%WHEEL_DIR%" mkdir "%WHEEL_DIR%"
-if not exist "%TARGET_DIR%" mkdir "%TARGET_DIR%"
+rem 1. Create wheel directory if it does not exist
+if not exist "%WHEEL_DIR%" (
+    echo [%DATE% %TIME%] Creating wheel download directory: "%WHEEL_DIR%"
+    mkdir "%WHEEL_DIR%"
+) else (
+    echo [%DATE% %TIME%] Wheel download directory already exists: "%WHEEL_DIR%"
+)
 
-:: 2. 清理 pip 缓存（可选）
-echo [2/4] Purging pip cache...
-"%PYTHON%" -m pip cache purge --disable-pip-version-check >nul 2>&1
+rem 2. Clear pip cache to avoid potential corruption
+echo [%DATE% %TIME%] Clearing pip cache
+python -m pip cache purge --disable-pip-version-check
 
-:: 3. 下载所有包及依赖：优先尝试官方源，失败再用镜像
-echo [3/4] Attempting download from official PyPI...
-"%PYTHON%" -m pip download %PACKAGES% ^
---dest "%WHEEL_DIR%" ^
---no-cache-dir ^
--i https://pypi.org/simple
+rem 3. Region detection (timezone). Use mirror first if China Standard Time
+set "PRIMARY_INDEX=%PIP_OFFICIAL%"
+set "SECONDARY_INDEX=%PIP_MIRROR%"
+for /f "delims=" %%A in ('2^>nul tzutil /g') do set "TZ_NAME=%%A"
+if /I "!TZ_NAME!"=="China Standard Time" (
+    set "PRIMARY_INDEX=%PIP_MIRROR%"
+    set "SECONDARY_INDEX=%PIP_OFFICIAL%"
+    echo [%DATE% %TIME%] Region CN detected by timezone. Using mirror first: !PRIMARY_INDEX!
+) else (
+    echo [%DATE% %TIME%] Region not CN by timezone. Using official first: !PRIMARY_INDEX!
+)
+
+echo.
+echo [%DATE% %TIME%] Attempting to download from: !PRIMARY_INDEX!
+python -m pip download %PACKAGES% --dest "%WHEEL_DIR%" --only-binary=:all: ^
+    --use-feature=fast-deps --no-cache-dir -i "!PRIMARY_INDEX!"
 if errorlevel 1 (
-    echo [WARN] Official PyPI failed. Trying TUNA mirror...
-    "%PYTHON%" -m pip download %PACKAGES% ^
-    --dest "%WHEEL_DIR%" ^
-    --no-cache-dir ^
-    -i https://pypi.tuna.tsinghua.edu.cn/simple
+    echo [%DATE% %TIME%] WARNING: Primary index failed. Trying secondary: !SECONDARY_INDEX!
+    python -m pip download %PACKAGES% --dest "%WHEEL_DIR%" --only-binary=:all: ^
+        --use-feature=fast-deps --no-cache-dir -i "!SECONDARY_INDEX!"
     if errorlevel 1 (
-        echo [ERROR] Failed to download packages from both sources.
+        echo [%DATE% %TIME%] ERROR: Failed to download packages from both indexes. Check your network or package names.
         pause & exit /b 1
     ) else (
-        echo [OK] Packages downloaded via TUNA mirror to "%WHEEL_DIR%"
+        echo [%DATE% %TIME%] SUCCESS: Packages downloaded via secondary index to "%WHEEL_DIR%"
     )
 ) else (
-    echo [OK] Packages downloaded via official PyPI to "%WHEEL_DIR%"
+    echo [%DATE% %TIME%] SUCCESS: Packages downloaded via primary index to "%WHEEL_DIR%"
 )
-echo Download complete. Wheels are in "%WHEEL_DIR%"
 
-:: 4. 离线安装到目标目录
-echo [4/4] Offline installing to "%TARGET_DIR%"...
-"%PYTHON%" -m pip install %PACKAGES% ^
---no-index ^
---find-links "%WHEEL_DIR%" ^
---target "%TARGET_DIR%" ^
---upgrade ^
---disable-pip-version-check
+rem 4. Create target installation directory if it does not exist
+if not exist "%TARGET_DIR%" (
+    echo [%DATE% %TIME%] Creating target installation directory: "%TARGET_DIR%"
+    mkdir "%TARGET_DIR%"
+) else (
+    echo [%DATE% %TIME%] Target installation directory already exists: "%TARGET_DIR%"
+)
+
+rem 5. Perform offline installation of all packages
+echo.
+echo [%DATE% %TIME%] Installing packages offline into: "%TARGET_DIR%"
+python -m pip install %PACKAGES% --no-index --find-links "%WHEEL_DIR%" ^
+    --target "%TARGET_DIR%" --upgrade --disable-pip-version-check
 if errorlevel 1 (
-echo [ERROR] Offline install failed. Please check the logs above.
-pause & exit /b 1
+    echo [%DATE% %TIME%] ERROR: Offline installation failed. Please review the errors above.
+    pause & exit /b 1
 )
 
-echo ------------------------------------------------------------
-echo [SUCCESS] All packages installed successfully to "%TARGET_DIR%"
+echo.
+echo [%DATE% %TIME%] SUCCESS: All packages have been installed successfully!
 pause
 endlocal

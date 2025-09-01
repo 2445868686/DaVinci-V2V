@@ -24,6 +24,7 @@ import time
 import wave
 import json
 import base64
+import threading
 import mimetypes
 import webbrowser
 from xml.dom import minidom
@@ -71,6 +72,24 @@ loading_win = dispatcher.AddWindow(
     ]
 )
 loading_win.Show()
+
+# ===== Loading label elapsed-time updater =====
+_loading_items = loading_win.GetItems()
+_loading_start_ts = time.time()
+_loading_timer_stop = False
+
+def _loading_timer_worker():
+    # Update once per second until stopped
+    while not _loading_timer_stop:
+        try:
+            elapsed = int(time.time() - _loading_start_ts)
+            _loading_items["LoadLabel"].Text = f"Please wait , loading... \n( {elapsed}s elapsed )"
+        except Exception:
+            pass
+        time.sleep(1.0)
+
+_loading_timer_thread = threading.Thread(target=_loading_timer_worker, daemon=True)
+_loading_timer_thread.start()
 
 # ================== DaVinci Resolve 接入 ==================
 try:
@@ -260,6 +279,7 @@ def render_video_by_marker(output_dir: str, custom_name: str, ratio_text: str) -
     proj.DeleteRenderJob(job_id)
 
     resolve.OpenPage("edit")
+    print(os.path.join(output_dir, custom_name + ".mp4"))
     return os.path.join(output_dir, custom_name + ".mp4")
 
 def get_first_empty_track(timeline, start_frame, end_frame, media_type):
@@ -658,7 +678,7 @@ v2v_win = dispatcher.AddWindow(
 runway_config_win = dispatcher.AddWindow(
     {
         "ID": "RunwayConfigWin",
-        "WindowTitle": "OpenAI API",
+        "WindowTitle": "Runway API",
         "Geometry": [900, 400, 350, 150],
         "Hidden": True,
         "StyleSheet": """
